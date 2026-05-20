@@ -1,0 +1,10 @@
+# Usiamo la variante ufficiale già configurata per girare come utente non-root (UID 101)
+FROM nginxinc/nginx-unprivileged:1.25-alpine
+
+# Copiamo il frontend. La directory è accessibile in lettura dall'utente nginx
+COPY index.html /usr/share/nginx/html/index.html
+
+# L'immagine unprivileged ascolta di default sulla porta 8080 invece che sulla 80
+EXPOSE 8080
+
+CMD ["nginx", "-g", "daemon off;"]

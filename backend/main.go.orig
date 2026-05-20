@@ -1,0 +1,180 @@
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+)
+
+// Definiamo la struttura dei dati che arrivano dal Frontend
+type ServiceRequest struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Image     string `json:"image"`
+	Port      int    `json:"port"`
+}
+
+func main() {
+	// Controlliamo che le variabili d'ambiente necessarie siano presenti nel Pod
+	if os.Getenv("GITHUB_TOKEN") == "" || os.Getenv("GITHUB_REPO") == "" || os.Getenv("GITHUB_OWNER") == "" {
+		log.Fatal("ERRORE: Configura le variabili d'ambiente GITHUB_TOKEN, GITHUB_OWNER e GITHUB_REPO")
+	}
+
+	// Gestiamo l'endpoint API. Usiamo una funzione middleware per gestire il CORS.
+	http.HandleFunc("/api/create", enableCORS(createGitOpsManifest))
+
+	fmt.Println("Backend API avviato sulla porta 8080...")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+// Middleware per abilitare il CORS ed evitare che il browser blocchi le richieste dal Frontend
+func enableCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Consente le richieste da qualsiasi origine. In produzione puoi restringerlo all'URL del tuo frontend.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// Se si tratta di una richiesta di "preflight" (OPTIONS), rispondiamo subito con OK
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func createGitOpsManifest(w http.ResponseWriter, r *http.Request) {
+	// Accettiamo solo richieste POST
+	if r.Method != http.MethodPost {
+		respondWithError(w, http.StatusMethodNotAllowed, "Metodo non consentito")
+		return
+	}
+
+	var req ServiceRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Dati JSON non validi")
+		return
+	}
+
+	// Validazione minima dell'input per sicurezza
+	if req.Name == "" || req.Namespace == "" || req.Image == "" || req.Port <= 0 {
+		respondWithError(w, http.StatusBadRequest, "Tutti i campi sono obbligatori e la porta deve essere maggiore di 0")
+		return
+	}
+
+	// Generiamo lo YAML dell'Application di ArgoCD con l'applicazione integrata
+	argoAppYAML := fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: %s
+  namespace: argocd
+spec:
+  project: default
+  source:
+    chart: ""
+    repoURL: ""
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: %s
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+  manifests: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: %s
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: %s
+      template:
+        metadata:
+          labels:
+            app: %s
+        spec:
+          containers:
+          - name: app
+            image: %s
+            ports:
+            - containerPort: %d
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: %s
+    spec:
+      ports:
+      - port: 80
+        targetPort: %d
+      selector:
+        app: %s
+`, req.Name, req.Namespace, req.Name, req.Name, req.Name, req.Image, req.Port, req.Name, req.Port, req.Name)
+
+	// Prepariamo il percorso del file e il messaggio di commit
+	filePath := fmt.Sprintf("apps/%s-app.yaml", req.Name)
+	message := fmt.Sprintf("chore: bootstrap microservice %s via portal", req.Name)
+	
+	// Codifichiamo il contenuto in Base64 (richiesto dalle API di GitHub)
+	encodedContent := base64.StdEncoding.EncodeToString([]byte(argoAppYAML))
+
+	githubPayload := map[string]string{
+		"message": message,
+		"content": encodedContent,
+		"branch":  "main", 
+	}
+
+	payloadBytes, _ := json.Marshal(githubPayload)
+
+	// Costruiamo la richiesta HTTP verso le API di GitHub
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", 
+		os.Getenv("GITHUB_OWNER"), os.Getenv("GITHUB_REPO"), filePath)
+	
+	gitReq, err := http.NewRequest("PUT", url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Errore nella creazione della richiesta per GitHub")
+		return
+	}
+	
+	gitReq.Header.Set("Authorization", "Bearer "+os.Getenv("GITHUB_TOKEN"))
+	gitReq.Header.Set("Content-Type", "application/json")
+	gitReq.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	// Eseguiamo la chiamata HTTP esterna
+	client := &http.Client{}
+	resp, err := client.Do(gitReq)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Errore di connessione a GitHub")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Controlliamo se GitHub ha accettato il file (200 OK o 201 Created)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("GitHub ha rifiutato la richiesta (Codice %d)", resp.StatusCode))
+		return
+	}
+
+	// Impostiamo il content type corretto e rispondiamo con successo al frontend
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Manifesto ArgoCD modificato e pushato correttamente!"})
+}
+
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
