@@ -23,5 +23,5 @@ jobs:
         uses: docker/build-push-action@v7.1.0
         with:
           file: /backend/Dockerfile.backend
-          tags: ${{ vars.GHCR_REG}}portal-backend:2.1-devel
+          tags: ${{ vars.GHCR_REG}}/antoguaro10/portal-backend:2.1-devel
           push: false
