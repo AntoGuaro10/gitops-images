@@ -13,6 +13,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v6
         with:
+          path: ./backend
           sparse-checkout: |
             backend/
           ref: main
@@ -30,6 +31,6 @@ jobs:
       - name: Build only
         uses: docker/build-push-action@v7.1.0
         with:
-          file: ./backend/Dockerfile.backend
+          file: ./Dockerfile.backend
           tags: ${{ vars.GHCR_REG}}/antoguaro10/portal-backend:2.1-devel
           push: false
