@@ -9,6 +9,14 @@ jobs:
   docker-build:
     runs-on: ubuntu-22.04
     steps:
+
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            backend/
+          ref: main
+
       - name: Authenticate to GHCR
         uses: docker/login-action@v4.1.0
         with:
@@ -22,6 +30,6 @@ jobs:
       - name: Build only
         uses: docker/build-push-action@v7.1.0
         with:
-          file: /backend/Dockerfile.backend
+          file: Dockerfile.backend
           tags: ${{ vars.GHCR_REG}}/antoguaro10/portal-backend:2.1-devel
           push: false
